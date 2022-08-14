@@ -2,14 +2,16 @@ const moduleID = 'pf2-flat-check';
 
 const actorConditionMap = {
     'Blinded': -Infinity, //Just so it gets picked up. DC partially depends on target.
-    'Dazzled': 5
+    'Dazzled': 5,
+    'N/A': -Infinity //To make sure reduce always runs
 };
 
 const targetConditionMap = {
     'Concealed': 5,
     'Hidden': 11,
     'Invisible': 11, //Treated as Undetected
-    'Undetected': 11
+    'Undetected': 11,
+    'N/A': -Infinity //To make sure reduce always runs
 };
 
 
@@ -95,19 +97,25 @@ function distanceBetween(token0, token1) {
 
 
 function getCondition(token, target, isSpell) {
-    const checkingAttacker = target === null;
-    const currentActor = checkingAttacker ? token?.actor : target?.actor;
-    const conditionMap = checkingAttacker ? { ...actorConditionMap } : targetConditionMap;
+    const checkingAttackerConditions = target === null;
+    const currentActor = checkingAttackerConditions ? token?.actor : target?.actor;
+    const conditionMap = checkingAttackerConditions ? { ...actorConditionMap } : targetConditionMap;
     const attackerBlinded = !!token.actor?.items?.find(i=>i.slug === "blinded");
     const attackerDazzled = !!token.actor?.items?.find(i=>i.slug === "dazzled");
     const attackerHasBlindFight = !!token.actor?.items?.find((i) => i.slug === "blind-fight");
+    const attackerHasSeeTheUnseen = !!token.actor?.items?.find((i) => i.slug === "see-the-unseen");
+    const attackerHasSuperiorSight = !!token.actor?.items?.find((i) => i.slug === "superior-sight");
     //Approximation of adjacency on a square grid with snap to grid on, ignoring elevation (so as to avoid having to implement the more complex pf2e rules).
     const attackerAdjacent = distanceBetween(token, target) <= 5;
     const attackerEqualOrHigherLevel = (token.actor?.level || -Infinity) >= (target?.actor?.level || Infinity);
+    const targetHasMistChild = !!target?.actor?.items?.find(i=>i.slug === "mist-child");
+    const attackerHasSenseAllies = !!token?.actor?.items?.find(i=>i.slug === "sense-allies");
+    const targetIsAlly = !!target?.actor?.isAllyOf(currentActor);
+    const targetWithin60Ft = distanceBetween(token, target) <= 60;
 
     const conditions = currentActor.itemTypes.condition
       .filter(c => {
-          if (checkingAttacker && isSpell) {
+          if (checkingAttackerConditions && isSpell) {
               const isStupefy = c.name === game.i18n.localize('PF2E.ConditionTypeStupefied');
               if (isStupefy) return true;
           }
@@ -116,9 +124,11 @@ function getCondition(token, target, isSpell) {
       .map(c => c.name)
       .sort();
 
-    if (!checkingAttacker && attackerBlinded && !conditions.includes('Hidden')) conditions.push('Hidden');
-    if (!checkingAttacker && attackerDazzled && !conditions.includes('Concealed')) conditions.push('Concealed');
+    if (!checkingAttackerConditions && attackerBlinded && !conditions.includes('Hidden')) conditions.push('Hidden');
+    if (!checkingAttackerConditions && attackerDazzled && !conditions.includes('Concealed')) conditions.push('Concealed');
     if (!conditions.length) return {};
+
+    conditions.unshift('N/A');
 
     let stupefyLevel;
     if (conditions.includes(game.i18n.localize('PF2E.ConditionTypeStupefied'))) {
@@ -128,33 +138,62 @@ function getCondition(token, target, isSpell) {
 
     let condition = conditions.reduce((acc, current) => {
         let currentDC = conditionMap[current];
-        if (checkingAttacker && attackerHasBlindFight) {
-            if (current === 'Dazzled') currentDC = -Infinity;
-        }
-        if (!checkingAttacker && attackerHasBlindFight) {
-            if (current === 'Concealed') {
-                currentDC = -Infinity;
-            } else if (current === 'Hidden') {
-                currentDC = 5;
-            } else if (current === 'Invisible' || current === 'Undetected') {
-              if (attackerAdjacent && attackerEqualOrHigherLevel) {
-                current = 'Hidden';
-                currentDC = 5;
-              }
+        if (checkingAttackerConditions) {
+            if (attackerHasBlindFight) {
+                if (current === 'Dazzled') currentDC = -Infinity;
             }
         }
+        if (!checkingAttackerConditions) {
+            if (targetHasMistChild) {
+                if (current === 'Hidden') {
+                    currentDC = 12;
+                } else if (current === 'Concealed') {
+                    currentDC = 6;
+                }
+            }
+            if (attackerHasSenseAllies && targetIsAlly && current !== 'Unnoticed' && targetWithin60Ft) {
+                if (current === 'Undetected') {
+                    current = 'Hidden';
+                }
+                if (current === 'Hidden') {
+                    currentDC = 5;
+                }
+            }
+            if (attackerHasSeeTheUnseen) {
+                if (current === 'Undetected' && attackerAdjacent) {
+                    current = 'Hidden';
+                }
+                if (current === 'Hidden') {
+                    currentDC = 5;
+                }
+            }
+            if (attackerHasBlindFight) {
+                if (current === 'Concealed') {
+                    currentDC = -Infinity;
+                } else if (current === 'Hidden') {
+                    currentDC = 5;
+                } else if (current === 'Invisible' || current === 'Undetected') {
+                    if (attackerAdjacent && attackerEqualOrHigherLevel) {
+                        current = 'Hidden';
+                        currentDC = 5;
+                    }
+                }
+            }
+            if (attackerHasSuperiorSight) {
+                if (current === 'Hidden') currentDC = -Infinity;
+                if (current === 'Concealed') currentDC = -Infinity;
+                if (current === 'Undetected') currentDC = -Infinity;
+            }
+
+        }
+
+        //TODO Bug when attack invisible with blindfight, probably more problems hidden there. The line below gets it wrong when I've changed current. So, either fix line below, or change 'current condition' some better way.
         return conditionMap[acc] > currentDC ? acc : current;
     });
     let DC = conditionMap[condition];
     if (condition === 'Stupefied') condition += ` ${stupefyLevel}`;
     if (DC === -Infinity) return {};
-    //The following lines are needed for when reduce doesn't run due to only a single condition being present.
-    if (attackerHasBlindFight) {
-        if (condition === 'Dazzled' && checkingAttacker) return {};
-        if (condition === 'Concealed' && !checkingAttacker) return {};
-        if ((condition === 'Invisible' || condition === 'Undetected') && !checkingAttacker && attackerAdjacent && attackerEqualOrHigherLevel) condition = 'Hidden';
-        if (condition === 'Hidden') DC = 5;
-    }
+    if (condition === 'N/A') return {};
 
     return {conditionName: condition, DC};
 }
